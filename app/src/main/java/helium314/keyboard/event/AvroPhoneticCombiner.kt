@@ -25,16 +25,26 @@ class AvroPhoneticCombiner(
 ) : Combiner {
 
     private val composingText = StringBuilder()
+    /** Per-character shift tracking — '1' for shifted, '0' for unshifted.
+     *  The keyboard framework uppercases ALL key codes when in shifted mode,
+     *  so we intercept SHIFT events and track state ourselves to apply
+     *  case per character rather than globally. */
+    private val shiftFlags = StringBuilder()
+    private var shiftActive = false
 
     override fun processEvent(previousEvents: ArrayList<Event>?, event: Event): Event {
         val codePoint = event.codePoint
 
-        if (event.keyCode == KeyCode.SHIFT) return event
+        if (event.keyCode == KeyCode.SHIFT) {
+            shiftActive = !shiftActive
+            return event
+        }
 
         if (event.keyCode == KeyCode.DELETE) {
             if (composingText.isNotEmpty()) {
                 val cp = composingText.codePointBefore(composingText.length)
                 composingText.delete(composingText.length - Character.charCount(cp), composingText.length)
+                shiftFlags.deleteCharAt(shiftFlags.length - 1)
                 if (composingText.isEmpty()) {
                     reset()
                     return Event.createHardwareKeypressEvent(0x20, Constants.CODE_SPACE, 0, event, event.isKeyRepeat)
@@ -53,21 +63,41 @@ class AvroPhoneticCombiner(
 
         if (!isValidCodePoint) return Event.createConsumedEvent(event)
 
-        composingText.append(Character.toChars(codePoint))
+        // Always store lowercase; per-character shift info rebuilds case in fixString
+        composingText.append(Character.toChars(Character.toLowerCase(codePoint)))
+        shiftFlags.append(if (shiftActive) '1' else '0')
         return Event.createConsumedEvent(event)
     }
 
     override val combiningStateFeedback: CharSequence
-        get() = engine.convert(composingText.toString())
+        get() {
+            val fixed = buildFixedString()
+            return engine.convert(fixed)
+        }
 
     override fun reset() {
         composingText.setLength(0)
+        shiftFlags.setLength(0)
+        shiftActive = false
     }
 
     private fun commitAndReset(event: Event): Event {
         val converted = combiningStateFeedback
         reset()
         return Event.createSoftwareTextEvent(converted, KeyCode.MULTIPLE_CODE_POINTS, event)
+    }
+
+    /** Rebuild the fixed string with per-character shift info.
+     *  Only case-sensitive characters are uppercased when shifted.
+     *  Non-case-sensitive characters stay lowercase regardless of shift state. */
+    private fun buildFixedString(): String {
+        val sb = StringBuilder()
+        for (i in composingText.indices) {
+            val c = composingText[i]
+            val shifted = i < shiftFlags.length && shiftFlags[i] == '1'
+            sb.append(if (shifted && c in engine.caseSensitiveChars) c.uppercaseChar() else c)
+        }
+        return sb.toString()
     }
 
     companion object {
@@ -126,7 +156,7 @@ class AvroPhoneticEngine(specJson: String) {
     private val patterns: List<PatternMatch> = parsePatterns(specJson)
     private val vowelChars: Set<Char>
     private val consonantChars: Set<Char>
-    private val caseSensitiveChars: Set<Char>
+    val caseSensitiveChars: Set<Char>
 
     init {
         val root = try { JSONObject(specJson) } catch (_: Exception) { JSONObject() }
@@ -137,21 +167,20 @@ class AvroPhoneticEngine(specJson: String) {
 
     fun convert(input: String): String {
         if (input.isEmpty()) return ""
-        val fixed = fixString(input)
         val output = StringBuilder()
         var cur = 0
-        while (cur < fixed.length) {
+        while (cur < input.length) {
             val start = cur
             var matched = false
 
             for (pattern in patterns) {
                 val end = cur + pattern.find.length
-                if (end > fixed.length) continue
-                if (!fixed.regionMatches(start, pattern.find, 0, pattern.find.length)) continue
+                if (end > input.length) continue
+                if (!input.regionMatches(start, pattern.find, 0, pattern.find.length)) continue
 
                 if (pattern.rules.isNotEmpty()) {
                     for (rule in pattern.rules) {
-                        if (evaluateRule(rule, fixed, start, end)) {
+                        if (evaluateRule(rule, input, start, end)) {
                             output.append(rule.replace)
                             cur = end - 1
                             matched = true
@@ -168,19 +197,11 @@ class AvroPhoneticEngine(specJson: String) {
             }
 
             if (!matched) {
-                output.append(fixed[cur])
+                output.append(input[cur])
             }
             cur++
         }
         return output.toString()
-    }
-
-    private fun fixString(input: String): String {
-        val sb = StringBuilder()
-        for (c in input) {
-            sb.append(if (c.lowercaseChar() in caseSensitiveChars) c else c.lowercaseChar())
-        }
-        return sb.toString()
     }
 
     private fun evaluateRule(rule: Rule, fixed: String, start: Int, end: Int): Boolean {

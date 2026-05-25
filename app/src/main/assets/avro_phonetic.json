@@ -1330,6 +1330,10 @@
       "replace": "া"
     },
     {
+      "find": "A",
+      "replace": "আ"
+    },
+    {
       "find": "a",
       "replace": "া",
       "rules": [
@@ -1733,5 +1737,5 @@
   ],
   "vowel": "aeiou",
   "consonant": "bcdfghjklmnpqrstvwxyz",
-  "casesensitive": "oiudgjnrstyz"
+  "casesensitive": "aoiudgjnrstyz"
 }
